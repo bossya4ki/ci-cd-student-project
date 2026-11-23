@@ -4,6 +4,7 @@ on:
     branches: [main, develop]
   pull_request:
     branches: [main]
+  workflow_dispatch:
 permissions:
   contents: read
 jobs:
@@ -24,6 +25,12 @@ jobs:
         with:
           name: coverage-${{ matrix.python-version }}
           path: coverage.xml
+      - uses: codecov/codecov-action@v5
+        if: vars.ENABLE_CODECOV == 'true' && github.event_name != 'pull_request' && matrix.python-version == '3.10'
+        with:
+          files: ./coverage.xml
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: true
   lint:
     needs: test
     runs-on: ubuntu-22.04
@@ -49,3 +56,42 @@ jobs:
         with:
           name: security-report
           path: security-report.html
+  deploy:
+    if: vars.ENABLE_PAGES == 'true' && github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    needs: [test, lint, security]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.publish.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs
+      - uses: actions/deploy-pages@v4
+        id: publish
+  notify:
+    if: failure() && vars.ENABLE_SLACK == 'true' && github.event_name != 'pull_request'
+    needs: [test, lint, security, deploy]
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Notify Slack
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import urllib.request
+          payload = json.dumps({"text": "CI завершился ошибкой: " + os.environ["RUN_URL"]}).encode()
+          request = urllib.request.Request(os.environ["SLACK_WEBHOOK_URL"], data=payload,
+                                           headers={"Content-Type": "application/json"})
+          with urllib.request.urlopen(request, timeout=15) as response:
+              print("Slack HTTP status:", response.status)
+          PY
